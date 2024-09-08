@@ -34,11 +34,11 @@ using BepInEx.Logging;
 using HarmonyLib;
 using Newtonsoft.Json;
 using System.IO.Compression;
+using System.Text;
 
 namespace ModsGate;
 
 using C = Constants;
-using Dependency = Dictionary<string, string>;
 
 [BepInPlugin("org.kidev.ltd2.modsgate", "Mods Gate", "1.0.0")]
 public class ModsGate : BaseUnityPlugin
@@ -138,25 +138,27 @@ public class ModsGate : BaseUnityPlugin
         try
         {
             string jsonContent = await FetchFileContentAsync(C.JsonURL);
-            ModData modData = JsonConvert.DeserializeObject<ModData>(jsonContent);
+            ModsConfig ModsConfig = JsonConvert.DeserializeObject<ModsConfig>(jsonContent);
             List<PluginInfo> installedPlugins = GetInstalledPlugins();
-            _htmlUrl = modData.Core.InjectHtml;
-            _htmlInjectionLine = modData.Core.InjectLine;
+            _htmlUrl = ModsConfig.Core.InjectHtml;
+            _htmlInjectionLine = ModsConfig.Core.InjectLine;
+            
+            _logger.LogInfo($"CONFIG.JSON:\n{ModsConfig.ToString()}");
 
             InjectIntoGateway();
 
-            _ = modData.Mods.Prepend(
-                new Mod(modData.Core.Name,
-                    modData.Core.Author,
-                    modData.Core.IconUrl,
-                    modData.Core.Url,
-                    modData.Core.Version,
-                    modData.Core.GameVersion,
-                    modData.Core.Description
+            _ = ModsConfig.Mods.Prepend(
+                new Mod(ModsConfig.Core.Name,
+                    ModsConfig.Core.Author,
+                    ModsConfig.Core.IconUrl,
+                    ModsConfig.Core.Url,
+                    ModsConfig.Core.Version,
+                    ModsConfig.Core.GameVersion,
+                    ModsConfig.Core.Description
                 )
             );
 
-            foreach (var mod in modData.Mods)
+            foreach (var mod in ModsConfig.Mods)
             {
                 var installedPlugin = installedPlugins.FirstOrDefault(p => p.Metadata.Name == mod.Name);
                 if (installedPlugin == null) continue;
@@ -274,6 +276,23 @@ public class Mod(
             Url[key] = Url[key].Replace("$", Version);
         }
     }
+    
+    public override string ToString()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Mod: {Name}");
+        sb.AppendLine($"  Author: {Author}");
+        sb.AppendLine($"  Icon URL: {IconUrl}");
+        sb.AppendLine($"  URLs:");
+        foreach (var kvp in Url)
+        {
+            sb.AppendLine($"    {kvp.Key}: {kvp.Value}");
+        }
+        sb.AppendLine($"  Version: {Version}");
+        sb.AppendLine($"  Game Version: {GameVersion}");
+        sb.AppendLine($"  Description: {Description}");
+        return sb.ToString();
+    }
 }
 
 public class Core
@@ -287,22 +306,76 @@ public class Core
     [JsonProperty("description")] public string Description { get; set; }
     [JsonProperty("inject_html")] public string InjectHtml { get; set; }
     [JsonProperty("inject_line")] public int InjectLine { get; set; }
-    [JsonProperty("dependancies")] public List<Dictionary<string, string>> Dependencies { get; set; }
-    [JsonProperty("dependancies_versions")] public List<DependencyVersion> DependencyVersions { get; set; }
+    [JsonProperty("dependencies")] public List<Dictionary<string, string>> Dependencies { get; set; }
+    [JsonProperty("dependencies_versions")] public List<DependencyVersion> DependencyVersions { get; set; }
     [JsonProperty("installers")] public Dictionary<string, string> Installers { get; set; }
     [JsonProperty("signatures")] public string Signatures { get; set; }
+    
+    public override string ToString()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Core: {Name}");
+        sb.AppendLine($"  Author: {Author}");
+        sb.AppendLine($"  Icon URL: {IconUrl}");
+        sb.AppendLine($"  URLs:");
+        foreach (var kvp in Url)
+        {
+            sb.AppendLine($"    {kvp.Key}: {kvp.Value}");
+        }
+        sb.AppendLine($"  Version: {Version}");
+        sb.AppendLine($"  Game Version: {GameVersion}");
+        sb.AppendLine($"  Description: {Description}");
+        sb.AppendLine($"  Inject HTML: {InjectHtml}");
+        sb.AppendLine($"  Inject Line: {InjectLine}");
+        sb.AppendLine("  Dependencies:");
+        foreach (var dep in Dependencies)
+        {
+            sb.AppendLine($"    {string.Join(", ", dep.Select(kvp => $"{kvp.Key}: {kvp.Value}"))}");
+        }
+        sb.AppendLine("  Dependency Versions:");
+        foreach (var depVer in DependencyVersions)
+        {
+            sb.AppendLine($"    {depVer}");
+        }
+        sb.AppendLine("  Installers:");
+        foreach (var kvp in Installers)
+        {
+            sb.AppendLine($"    {kvp.Key}: {kvp.Value}");
+        }
+        sb.AppendLine($"  Signatures: {Signatures}");
+        return sb.ToString();
+    }
 }
 
 public class DependencyVersion
 {
     [JsonProperty("name")] public string Name { get; set; }
     [JsonProperty("version")] public string Version { get; set; }
+    
+    public override string ToString()
+    {
+        return $"DependencyVersion: {Name} (Version: {Version})";
+    }
 }
 
-public class ModData
+public class ModsConfig
 {
     [JsonProperty("core")] public Core Core { get; set; }
     [JsonProperty("mods")] public List<Mod> Mods { get; set; }
+    
+    public override string ToString()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("### CONFIG.JSON ###:");
+        sb.AppendLine("Core:");
+        sb.AppendLine(Core.ToString());
+        sb.AppendLine("Mods:");
+        foreach (var mod in Mods)
+        {
+            sb.AppendLine(mod.ToString());
+        }
+        return sb.ToString();
+    }
 }
 
 internal static class Constants
