@@ -35,6 +35,7 @@ using HarmonyLib;
 using Newtonsoft.Json;
 using System.IO.Compression;
 using System.Text;
+using AutoHackGame;
 
 namespace ModsGate;
 
@@ -43,94 +44,29 @@ using C = Constants;
 [BepInPlugin("org.kidev.ltd2.modsgate", "Mods Gate", "1.0.0")]
 public class ModsGate : BaseUnityPlugin
 {
-    private readonly Assembly _assembly = Assembly.GetExecutingAssembly();
-    private readonly Harmony _harmony = new("org.kidev.ltd2.modsgate");
-
     private static readonly HttpClient Client = new HttpClient();
     private static ManualLogSource _logger;
-    private string _gatewayFileAbs;
-    private string _gatewayFileModdedAbs;
-    private string _htmlUrl;
-    private int _htmlInjectionLine;
+    private UIPatcher _patcher;
+    private List<Mod> _mods;
+
+    private Mod GetMod(string modName)
+    {
+        return _mods.FirstOrDefault(m => m.Name == modName);
+    }
 
     public void Awake()
     {
         _logger = Logger;
         _logger.LogInfo("Mods gate loaded!");
-
-        _gatewayFileAbs =
-            Path.Combine(Paths.GameRootPath, "Legion TD 2_Data", "uiresources", "AeonGT", C.GatewayFileName);
-        _gatewayFileModdedAbs =
-            Path.Combine(Paths.GameRootPath, "Legion TD 2_Data", "uiresources", "AeonGT", C.GatewayFileNameModded);
-
-        try
-        {
-            RemoveTempFiles();
-            _harmony.PatchAll(_assembly);
-        }
-        catch (Exception e)
-        {
-            Logger.LogError($"Error while patching: {e}");
-            throw;
-        }
+        
+        _patcher = new UIPatcher(Assembly.GetExecutingAssembly(), Path.Combine(Paths.GameRootPath, "Legion TD 2_Data", "uiresources", "AeonGT"));
 
         _ = CheckForUpdatesAsync();
     }
 
     public void OnDestroy()
     {
-        RemoveTempFiles();
-    }
-
-    private void InjectIntoGateway()
-    {
-        var lines = File.ReadAllLines(_gatewayFileAbs);
-        using (var client = new System.Net.WebClient())
-        {
-            string htmlContent = client.DownloadString(_htmlUrl);
-            lines[_htmlInjectionLine] = htmlContent + Environment.NewLine + lines[_htmlInjectionLine];
-        }
-
-        File.WriteAllLines(_gatewayFileModdedAbs, lines);
-    }
-
-    private void RemoveTempFiles()
-    {
-        if (File.Exists(_gatewayFileModdedAbs))
-        {
-            File.Delete(_gatewayFileModdedAbs);
-        }
-    }
-
-    [SuppressMessage("ReSharper", "InconsistentNaming")]
-    [SuppressMessage("ReSharper", "UnusedMember.Local")]
-    [HarmonyPatch]
-    internal static class PatchSendCreateView
-    {
-        private static Type _typeCoherentUIGTView;
-
-        [HarmonyPrepare]
-        private static void Prepare()
-        {
-            _typeCoherentUIGTView = AccessTools.TypeByName("CoherentUIGTView");
-        }
-
-        [HarmonyTargetMethod]
-        private static MethodBase TargetMethod()
-        {
-            return AccessTools.Method(_typeCoherentUIGTView, "SendCreateView");
-        }
-
-        [HarmonyPrefix]
-        private static bool SendCreateViewPre(ref string ___m_Page)
-        {
-            if (___m_Page.Equals(C.GatewayFile))
-            {
-                ___m_Page = C.GatewayFileModded;
-            }
-
-            return true;
-        }
+        _patcher.CleanupPatchedFiles();
     }
 
     private async Task CheckForUpdatesAsync()
@@ -138,27 +74,28 @@ public class ModsGate : BaseUnityPlugin
         try
         {
             string jsonContent = await FetchFileContentAsync(C.JsonURL);
-            ModsConfig ModsConfig = JsonConvert.DeserializeObject<ModsConfig>(jsonContent);
-            List<PluginInfo> installedPlugins = GetInstalledPlugins();
-            _htmlUrl = ModsConfig.Core.InjectHtml;
-            _htmlInjectionLine = ModsConfig.Core.InjectLine;
+            ModsConfig modsConfig = JsonConvert.DeserializeObject<ModsConfig>(jsonContent);
+
+            await _patcher.DownloadAndApplyPatchesAsync(modsConfig.Core.UIPatches);
             
-            _logger.LogInfo($"CONFIG.JSON:\n{ModsConfig.ToString()}");
+            List<PluginInfo> installedPlugins = GetInstalledPlugins();
+            
+            _logger.LogInfo("Before...");
+            _logger.LogInfo(modsConfig);
 
-            InjectIntoGateway();
-
-            _ = ModsConfig.Mods.Prepend(
-                new Mod(ModsConfig.Core.Name,
-                    ModsConfig.Core.Author,
-                    ModsConfig.Core.IconUrl,
-                    ModsConfig.Core.Url,
-                    ModsConfig.Core.Version,
-                    ModsConfig.Core.GameVersion,
-                    ModsConfig.Core.Description
+            modsConfig.Mods = modsConfig.Mods.Prepend(
+                new Mod(modsConfig.Core.Name,
+                    modsConfig.Core.GUID,
+                    modsConfig.Core.Author,
+                    modsConfig.Core.IconUrl,
+                    modsConfig.Core.Url,
+                    modsConfig.Core.Version,
+                    modsConfig.Core.GameVersion,
+                    modsConfig.Core.Description
                 )
-            );
+            ).ToList();
 
-            foreach (var mod in ModsConfig.Mods)
+            foreach (var mod in modsConfig.Mods)
             {
                 var installedPlugin = installedPlugins.FirstOrDefault(p => p.Metadata.Name == mod.Name);
                 if (installedPlugin == null) continue;
@@ -166,11 +103,18 @@ public class ModsGate : BaseUnityPlugin
                 Version jsonVersion = new Version(mod.Version);
 
                 mod.ReplaceVersionInUrls();
+                
+                HudApi.TriggerHudEvent(C.UpdatedModsDataEvent, mod.GUID, mod.ToString());
 
                 if (jsonVersion <= installedVersion) continue;
                 _logger.LogInfo($"Update available for {mod.Name}: {installedVersion} -> {jsonVersion}");
                 await UpdateModAsync(mod, installedPlugin);
             }
+            
+            _mods = modsConfig.Mods;
+
+            _logger.LogInfo("After...");
+            _logger.LogInfo(modsConfig);
         }
         catch (Exception ex)
         {
@@ -189,6 +133,93 @@ public class ModsGate : BaseUnityPlugin
     {
         return BepInEx.Bootstrap.Chainloader.PluginInfos.Values.ToList();
     }
+    
+    public async Task InstallMod(string modName)
+    {
+        var mod = GetMod(modName);
+
+        if (mod == null)
+        {
+            throw new Exception($"Mod {modName} not found");
+        }
+
+        using var client = new HttpClient();
+        var response = await client.GetAsync(mod.Url["*"]);
+        response.EnsureSuccessStatusCode();
+
+        var dllBytes = await response.Content.ReadAsByteArrayAsync();
+
+        await File.WriteAllBytesAsync(mod.GetDllFilePath(), dllBytes);
+        _logger.LogInfo($"Mod {modName} installed successfully.");
+    }
+
+    public void UninstallMod(string modName)
+    {
+        var mod = GetMod(modName);
+
+        if (mod == null)
+        {
+            throw new Exception($"Mod {modName} not found");
+        }
+
+        var dllPath = mod.GetDllFilePath();
+
+        if (File.Exists(dllPath))
+        {
+            File.Delete(dllPath);
+            _logger.LogInfo($"Mod {modName} uninstalled successfully.");
+        }
+        else
+        {
+            _logger.LogInfo($"Mod {modName} not found in plugins folder.");
+        }
+    }
+
+    public void DeactivateMod(string modName)
+    {
+        var mod = GetMod(modName);
+
+        if (mod == null)
+        {
+            throw new Exception($"Mod {modName} not found");
+        }
+
+        var dllPath = mod.GetDllFilePath();
+        var dllDeactivatedPath = $"{dllPath}.deactivated";
+
+        if (File.Exists(dllPath) && !File.Exists(dllDeactivatedPath))
+        {
+            File.Move(dllPath, dllDeactivatedPath);
+            _logger.LogInfo($"Mod {modName} deactivated successfully.");
+        }
+        else
+        {
+            _logger.LogInfo($"Mod {modName} is already deactivated or not found.");
+        }
+    }
+
+    public void ReactivateMod(string modName)
+    {
+        var mod = GetMod(modName);
+
+        if (mod == null)
+        {
+            throw new Exception($"Mod {modName} not found");
+        }
+
+        var dllPath = mod.GetDllFilePath();
+        var dllDeactivatedPath = $"{dllPath}.deactivated";
+
+        if (File.Exists(dllDeactivatedPath) && !File.Exists(dllPath))
+        {
+            File.Move(dllDeactivatedPath, dllPath);
+            _logger.LogInfo($"Mod {modName} reactivated successfully.");
+        }
+        else
+        {
+            _logger.LogInfo($"Mod {modName} is not deactivated or the activated file already exists.");
+        }
+    }
 
     private static async Task UpdateModAsync(Mod mod, PluginInfo installedPlugin)
     {
@@ -200,7 +231,7 @@ public class ModsGate : BaseUnityPlugin
 
             _logger.LogInfo($"Downloading {downloadUrl} to {extractPath}");
             using (var response = await Client.GetAsync(downloadUrl))
-            using (var fs = new FileStream(zipPath, FileMode.CreateNew))
+            await using (var fs = new FileStream(zipPath, FileMode.CreateNew))
             {
                 await response.Content.CopyToAsync(fs);
             }
@@ -224,6 +255,7 @@ public class ModsGate : BaseUnityPlugin
 
 public class Mod(
     string name,
+    string guid,
     string author,
     string iconUrl,
     Dictionary<string, string> url,
@@ -232,6 +264,7 @@ public class Mod(
     string description)
 {
     [JsonProperty("name")] public string Name { get; set; } = name;
+    [JsonProperty("guid")] public string GUID { get; set; } = guid;
     [JsonProperty("author")] public string Author { get; set; } = author;
     [JsonProperty("icon_url")] public string IconUrl { get; set; } = iconUrl;
     [JsonProperty("url")] public Dictionary<string, string> Url { get; set; } = url;
@@ -276,11 +309,17 @@ public class Mod(
             Url[key] = Url[key].Replace("$", Version);
         }
     }
+
+    public string GetDllFilePath()
+    {
+        return Path.Combine(Paths.PluginPath, $"{Name}.dll");
+    }
     
     public override string ToString()
     {
         var sb = new StringBuilder();
         sb.AppendLine($"Mod: {Name}");
+        sb.AppendLine($"  GUID: {GUID}");
         sb.AppendLine($"  Author: {Author}");
         sb.AppendLine($"  Icon URL: {IconUrl}");
         sb.AppendLine($"  URLs:");
@@ -298,14 +337,14 @@ public class Mod(
 public class Core
 {
     [JsonProperty("name")] public string Name { get; set; }
+    [JsonProperty("guid")] public string GUID { get; set; }   
     [JsonProperty("author")] public string Author { get; set; }
     [JsonProperty("icon_url")] public string IconUrl { get; set; }
     [JsonProperty("url")] public Dictionary<string, string> Url { get; set; }
     [JsonProperty("version")] public string Version { get; set; }
     [JsonProperty("game_version")] public string GameVersion { get; set; }
     [JsonProperty("description")] public string Description { get; set; }
-    [JsonProperty("inject_html")] public string InjectHtml { get; set; }
-    [JsonProperty("inject_line")] public int InjectLine { get; set; }
+    [JsonProperty("ui_patches")] public string UIPatches { get; set; }
     [JsonProperty("dependencies")] public List<Dictionary<string, string>> Dependencies { get; set; }
     [JsonProperty("dependencies_versions")] public List<DependencyVersion> DependencyVersions { get; set; }
     [JsonProperty("installers")] public Dictionary<string, string> Installers { get; set; }
@@ -315,6 +354,7 @@ public class Core
     {
         var sb = new StringBuilder();
         sb.AppendLine($"Core: {Name}");
+        sb.AppendLine($"  GUID: {GUID}");
         sb.AppendLine($"  Author: {Author}");
         sb.AppendLine($"  Icon URL: {IconUrl}");
         sb.AppendLine($"  URLs:");
@@ -325,8 +365,7 @@ public class Core
         sb.AppendLine($"  Version: {Version}");
         sb.AppendLine($"  Game Version: {GameVersion}");
         sb.AppendLine($"  Description: {Description}");
-        sb.AppendLine($"  Inject HTML: {InjectHtml}");
-        sb.AppendLine($"  Inject Line: {InjectLine}");
+        sb.AppendLine($"  UI Patches: {UIPatches}");
         sb.AppendLine("  Dependencies:");
         foreach (var dep in Dependencies)
         {
@@ -380,9 +419,6 @@ public class ModsConfig
 
 internal static class Constants
 {
-    internal const string GatewayFileName = "gateway.html";
-    internal const string GatewayFileNameModded = "__gateway.html";
-    internal const string GatewayFile = "coui://uiresources/AeonGT/gateway.html";
-    internal const string GatewayFileModded = "coui://uiresources/AeonGT/__gateway.html";
     internal const string JsonURL = "https://raw.githubusercontent.com/LegionTD2-Modding/.github/main/mods/config.json";
+    internal const string UpdatedModsDataEvent = "UpdatedModsData";
 }
